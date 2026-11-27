@@ -8,6 +8,7 @@
 //! threads, the queue, the preload, the gapless join and the loudness gain are the engine's.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
@@ -32,6 +33,10 @@ use crate::segments::Segments;
 const PATIENCE: Duration = Duration::from_secs(15);
 /// The attempts a fetch gets before the track is reported unavailable.
 const ATTEMPTS: u32 = 2;
+/// The streams only a Premium account is offered: 256 kbps AAC and Opus.
+const PREMIUM: [u32; 2] = [141, 774];
+/// The ceiling that takes the best stream without first asking for a Premium one.
+const BEST_OFFERED: Option<u32> = Some(u32::MAX);
 /// The level the stream host measures `loudnessDb` against, in LUFS.
 const REFERENCE_LUFS: f32 = -14.0;
 /// How far past the download a seek may land and still wait for it rather than start another
@@ -80,11 +85,17 @@ pub struct Loaded {
 
 pub struct Factory {
     api: Arc<YtMusic>,
+    /// Whether asking for a Premium stream is still worth it, shared by every engine the
+    /// factory starts.
+    premium: Arc<AtomicBool>,
 }
 
 impl Factory {
     pub fn new(api: Arc<YtMusic>) -> Self {
-        Self { api }
+        Self {
+            api,
+            premium: Arc::new(AtomicBool::new(true)),
+        }
     }
 }
 
@@ -96,6 +107,7 @@ impl PlaybackFactory for Factory {
                 media: ranged::media("youtube", reqwest::Client::new),
                 ceiling: ceiling(config.quality),
                 shelf: config.vault.as_ref().map(|vault| vault.shelf("youtube")),
+                premium: self.premium.clone(),
             },
             config,
         )
@@ -110,6 +122,10 @@ struct YouTube {
     ceiling: Option<u32>,
     /// Where played tracks are kept, so playing one again asks YouTube for nothing.
     shelf: Option<Shelf>,
+    /// Whether the best quality still asks for a Premium stream first. That ask goes through
+    /// the signed-in client and can take most of a load's patience, so once a track comes
+    /// back without one, the account is taken to have none on offer for the rest of the run.
+    premium: Arc<AtomicBool>,
 }
 
 /// What the stream host said about a track, kept beside it in the vault so a kept track plays
@@ -170,6 +186,7 @@ impl Fetch for YouTube {
                 &self.media,
                 id,
                 self.ceiling,
+                &self.premium,
                 self.shelf.as_ref(),
             );
             match opened.await {
@@ -297,12 +314,27 @@ async fn attempt_open(
     media: &reqwest::Client,
     id: &str,
     ceiling: Option<u32>,
+    premium: &AtomicBool,
     shelf: Option<&Shelf>,
 ) -> Result<Loaded> {
     let started = Instant::now();
-    let (format, audio) = tokio::time::timeout(PATIENCE, api.open_audio_within(id, ceiling))
+    let asked = match ceiling.is_none() && !premium.load(Ordering::Relaxed) {
+        true => BEST_OFFERED,
+        false => ceiling,
+    };
+    let (format, audio) = tokio::time::timeout(PATIENCE, api.open_audio_within(id, asked))
         .await
         .context("stream metadata timed out")??;
+    if asked.is_none()
+        && api.is_cookie_auth()
+        && !PREMIUM.contains(&format.itag)
+        && premium.swap(false, Ordering::Relaxed)
+    {
+        log::info!(
+            "playback: youtube offered {id} no premium stream, so tracks skip asking for one \
+             from now on"
+        );
+    }
     let total = audio.total();
     let locator = Arc::new(Renewal(audio.locator()));
     let audio = Download(audio);
