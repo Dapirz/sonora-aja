@@ -175,6 +175,7 @@ release-ep = EP
 release-audiobook = Buku audio
 release-podcast = Podcast
 kind-song = Lagu
+kind-video = Video
 kind-artist = Artis
 kind-album = Album
 kind-playlist = Playlist

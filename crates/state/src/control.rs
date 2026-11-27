@@ -695,15 +695,19 @@ impl Control {
         }
         let Found {
             tracks,
+            videos,
             albums,
             playlists,
             artists,
+            ..
         } = found;
         let catalog = Catalog {
             tracks: tracks.unwrap_or_default(),
+            videos: videos.unwrap_or_default(),
             albums: albums.unwrap_or_default(),
             playlists: playlists.unwrap_or_default(),
             artists: artists.unwrap_or_default(),
+            paged: Default::default(),
         };
         let library = self.library.read(cx).state(Shelf::Streaming);
         let ranked = search::rank(
@@ -958,7 +962,8 @@ fn play(playback: &mut Playback, command: PlaybackCommand, cx: &mut Context<Play
 /// artist drawn from a track that names no id.
 fn wire_hit(hit: Hit, client: &dyn MusicApi) -> Option<wire::Hit> {
     let (kind, media, id, title, by, duration) = match hit {
-        Hit::Song(track) => (
+        // the command line has no video kind, so a video plays and lists as the song it is
+        Hit::Song(track) | Hit::Video(track) => (
             Kind::Song,
             MediaKind::Track,
             track.id?,
@@ -1261,7 +1266,7 @@ fn search_kind(kind: Kind) -> search::Kind {
 /// from the local provider. An artist without an id has nothing to fetch.
 fn local_source(hit: Hit) -> Option<Source> {
     match hit {
-        Hit::Song(track) => Some(Source::Track(track)),
+        Hit::Song(track) | Hit::Video(track) => Some(Source::Track(track)),
         Hit::Album(album) => Some(Source::Link(album.name, Linked::Album(album.id))),
         Hit::Artist(artist) => Some(Source::Link(artist.name, Linked::Artist(artist.id?))),
         Hit::Playlist(playlist) => Some(Source::Link(playlist.name, Linked::Playlist(playlist.id))),

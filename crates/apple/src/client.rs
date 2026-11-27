@@ -1386,6 +1386,8 @@ impl MusicApi for AppleClient {
                 .iter()
                 .filter_map(|row| wire::song(row, &self.root_genre))
                 .collect()),
+            videos: Ok(Vec::new()),
+            more: Default::default(),
             albums: Ok(results
                 .albums
                 .rows()

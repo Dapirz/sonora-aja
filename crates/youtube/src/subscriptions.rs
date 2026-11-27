@@ -38,31 +38,9 @@ pub async fn saved(api: &YtMusic) -> Result<Vec<SavedArtist>> {
     Ok(artists)
 }
 
-/// The artists YouTube Music finds for `query`, from its search filtered to artists. It goes out
-/// signed out, so it stays out of the account's search history.
-pub async fn search(api: &YtMusic, query: &str) -> Result<Vec<SavedArtist>> {
-    let response = api
-        .execute_with(
-            "search",
-            Client::Music,
-            json!({ "query": query, "params": ytmusic::search::ARTISTS }),
-            false,
-        )
-        .await
-        .context("cannot search youtube music for artists")?;
-    Ok(
-        ytmusic::parse::find_renderers(&response, "musicShelfRenderer")
-            .into_iter()
-            .flat_map(|shelf| shelf.items(&["contents"]))
-            .filter_map(|item| item.at(&["musicResponsiveListItemRenderer"]))
-            .filter_map(saved_artist)
-            .collect(),
-    )
-}
-
 /// An artist out of a library or search row. Only a channel id (`UC…`) counts, which leaves
 /// out the profiles and podcasts a row can also point at.
-fn saved_artist(renderer: &Value) -> Option<SavedArtist> {
+pub(crate) fn saved_artist(renderer: &Value) -> Option<SavedArtist> {
     let id = renderer
         .str_at(&["navigationEndpoint", "browseEndpoint", "browseId"])
         .or_else(|| {

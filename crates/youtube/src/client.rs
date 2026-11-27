@@ -6,9 +6,9 @@ use async_trait::async_trait;
 use futures::{StreamExt as _, stream};
 use music::cover::{self, CoverLimits};
 use music::{
-    Album, AlbumCatalogue, AlbumDetail, Artist, ArtistCatalogue, ArtistProfile, Feed, Genre,
+    Album, AlbumCatalogue, AlbumDetail, Artist, ArtistCatalogue, ArtistProfile, Feed, Found, Genre,
     GenreDetail, HomeFeed, MediaKind, MusicApi, Playlist, PlaylistDetail, RadioSeed, SUGGESTIONS,
-    SavedArtist, Track, UserProfile, escape,
+    SavedArtist, SearchKind, Track, UserProfile, escape,
 };
 use tokio::task::JoinSet;
 use ytmusic::YtMusic;
@@ -458,36 +458,50 @@ impl MusicApi for YouTubeClient {
     }
 
     async fn search(&self, query: &str) -> Result<Vec<Track>> {
-        Ok(search::tracks(&self.api, query)
-            .await?
-            .into_iter()
-            .enumerate()
-            .map(|(index, track)| wire::track(track, index as u32))
-            .collect())
+        self.search_one(query, SearchKind::Tracks).await.tracks
+    }
+
+    async fn search_videos(&self, query: &str) -> Result<Vec<Track>> {
+        self.search_one(query, SearchKind::Videos).await.videos
     }
 
     async fn search_albums(&self, query: &str) -> Result<Vec<Album>> {
-        Ok(self
-            .api
-            .search_albums_with(query, false)
-            .await?
-            .into_iter()
-            .map(wire::album)
-            .collect())
+        self.search_one(query, SearchKind::Albums).await.albums
     }
 
     async fn search_artists(&self, query: &str) -> Result<Vec<SavedArtist>> {
-        subscriptions::search(&self.api, query).await
+        self.search_one(query, SearchKind::Artists).await.artists
     }
 
     async fn search_playlists(&self, query: &str) -> Result<Vec<Playlist>> {
-        Ok(self
-            .api
-            .search_playlists_with(query, false)
-            .await?
-            .into_iter()
-            .map(|playlist| wire::playlist(playlist, false, false))
-            .collect())
+        self.search_one(query, SearchKind::Playlists)
+            .await
+            .playlists
+    }
+
+    /// Every kind at once, each a filtered search of its own so each can go on page by page.
+    async fn search_all(&self, query: &str) -> Found {
+        let api = &self.api;
+        let (tracks, videos, albums, playlists, artists) = futures::join!(
+            search::first(api, query, SearchKind::Tracks),
+            search::first(api, query, SearchKind::Videos),
+            search::first(api, query, SearchKind::Albums),
+            search::first(api, query, SearchKind::Playlists),
+            search::first(api, query, SearchKind::Artists),
+        );
+        let mut found = Found::empty();
+        search::file(&mut found, SearchKind::Tracks, tracks);
+        search::file(&mut found, SearchKind::Videos, videos);
+        search::file(&mut found, SearchKind::Albums, albums);
+        search::file(&mut found, SearchKind::Playlists, playlists);
+        search::file(&mut found, SearchKind::Artists, artists);
+        found
+    }
+
+    async fn search_more(&self, kind: SearchKind, token: &str) -> Result<Found> {
+        let mut found = Found::empty();
+        search::file(&mut found, kind, Ok(search::more(&self.api, token).await?));
+        Ok(found)
     }
 
     async fn home(&self) -> Result<HomeFeed> {
@@ -558,6 +572,19 @@ pub(crate) fn library_playlist(source: ytmusic::Playlist, account: &str) -> Opti
 fn name_owned_playlist(playlist: &mut Playlist, account: &str) {
     if playlist.owned && playlist.owner.is_empty() {
         playlist.owner = account.to_owned();
+    }
+}
+
+impl YouTubeClient {
+    /// The first page of `kind` alone for `query`, for a caller after one kind.
+    async fn search_one(&self, query: &str, kind: SearchKind) -> Found {
+        let mut found = Found::empty();
+        search::file(
+            &mut found,
+            kind,
+            search::first(&self.api, query, kind).await,
+        );
+        found
     }
 }
 

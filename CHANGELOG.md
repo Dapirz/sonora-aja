@@ -21,6 +21,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Start a radio from a playlist, album or artist through its menu, on every service that has song radio. It keeps going with songs like the ones in it.
 - The fullscreen player has the Sessions button at the left of its controls on wide windows too, across from the volume.
 - `sonora playlist list`, `create`, `rename`, `public`, `add`, `remove` and `delete` manage playlists from the command line and the control socket.
+- YouTube Music search lists music videos in a Videos column of their own, next to Songs, so a song and its video no longer crowd one list.
+- YouTube Music search results keep coming as you scroll: each column loads its next page as you near the end, instead of stopping at the first 20.
 
 ### Changed
 

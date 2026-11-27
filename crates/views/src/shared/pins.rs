@@ -45,7 +45,7 @@ impl Pinned for SavedArtist {
 impl Pinned for Hit {
     fn pin(&self) -> Option<Pin> {
         let (kind, id, name, cover) = match self {
-            Self::Song(track) => return track.pin(),
+            Self::Song(track) | Self::Video(track) => return track.pin(),
             Self::Artist(artist) => (
                 PinKind::Artist,
                 artist.id.clone()?,

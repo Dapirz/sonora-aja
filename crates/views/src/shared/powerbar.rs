@@ -332,7 +332,7 @@ impl Powerbar {
     /// Whether `hit` is what plays right now, which turns its play button into pause.
     fn playing(&self, hit: &Hit, cx: &App) -> bool {
         match hit {
-            Hit::Song(track) => {
+            Hit::Song(track) | Hit::Video(track) => {
                 track.id.is_some()
                     && track.id == self.playback_status.0
                     && self.playback_status.1 == Some(true)
@@ -354,7 +354,9 @@ impl Powerbar {
     ) -> Card {
         let chosen = self.selected() == Some(item_idx);
         let current = match hit {
-            Hit::Song(track) => track.id.is_some() && track.id == self.playback_status.0,
+            Hit::Song(track) | Hit::Video(track) => {
+                track.id.is_some() && track.id == self.playback_status.0
+            }
             _ => false,
         };
 
@@ -464,9 +466,9 @@ impl Powerbar {
     fn hints(&self, cx: &App) -> impl IntoElement {
         let theme = cx.theme();
         let target = self.target();
-        let song = matches!(target, Some(Hit::Song(_)));
+        let song = matches!(target, Some(Hit::Song(_) | Hit::Video(_)));
         let enter = match target {
-            Some(Hit::Song(_)) => t!("common-play"),
+            Some(Hit::Song(_) | Hit::Video(_)) => t!("common-play"),
             Some(_) => t!("powerbar-open"),
             None => t!("search-submit"),
         };
@@ -685,7 +687,7 @@ fn recent(cx: &App) -> Vec<Hit> {
 
 fn navigate_hit(hit: &Hit, cx: &mut App) {
     match hit {
-        Hit::Song(track) => {
+        Hit::Song(track) | Hit::Video(track) => {
             if let Some(id) = &track.id {
                 navigate(Destination::Song(SharedString::from(id.clone())), cx);
             }
@@ -710,7 +712,7 @@ fn navigate_hit(hit: &Hit, cx: &mut App) {
 /// The origin that playing `hit` starts, for every kind but a song, which starts a radio.
 fn origin_of(hit: &Hit) -> Option<Origin> {
     match hit {
-        Hit::Song(_) => None,
+        Hit::Song(_) | Hit::Video(_) => None,
         Hit::Artist(artist) => Some(Origin::artist(artist.id.clone()?).named(artist.name.clone())),
         Hit::Album(album) => Some(Origin::album(album.id.clone()).named(album.name.clone())),
         Hit::Playlist(list) => Some(Origin::playlist(list.id.clone()).named(list.name.clone())),
@@ -723,7 +725,9 @@ fn origin_of(hit: &Hit) -> Option<Origin> {
 fn enter_hit(hit: &Hit, playback: &Entity<Playback>, cx: &mut App) {
     hit.remember(cx);
     match hit {
-        Hit::Song(track) => playback.update(cx, |playback, cx| playback.play_radio(track, cx)),
+        Hit::Song(track) | Hit::Video(track) => {
+            playback.update(cx, |playback, cx| playback.play_radio(track, cx))
+        }
         _ => navigate_hit(hit, cx),
     }
 }
@@ -733,7 +737,7 @@ fn enter_hit(hit: &Hit, playback: &Entity<Playback>, cx: &mut App) {
 fn toggle_hit(hit: &Hit, playback: &Entity<Playback>, cx: &mut App) {
     hit.remember(cx);
     playback.update(cx, |playback, cx| match (hit, origin_of(hit)) {
-        (Hit::Song(track), _) => {
+        (Hit::Song(track) | Hit::Video(track), _) => {
             let current = track.id.is_some()
                 && playback.track().and_then(|playing| playing.id.as_ref()) == track.id.as_ref();
             match current {

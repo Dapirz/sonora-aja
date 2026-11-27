@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -279,31 +280,61 @@ pub struct GenreSection {
     pub items: Vec<GenreItem>,
 }
 
+/// One kind of thing a search lists, which a provider may answer page by page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SearchKind {
+    Tracks,
+    Videos,
+    Albums,
+    Playlists,
+    Artists,
+}
+
 /// What one search found for every kind it looks for. Each kind keeps its own outcome, so a
 /// part the provider refused leaves the others standing.
 #[derive(Debug)]
 pub struct Found {
     pub tracks: anyhow::Result<Vec<Track>>,
+    /// Music videos, for a provider that files them apart from its songs.
+    pub videos: anyhow::Result<Vec<Track>>,
     pub albums: anyhow::Result<Vec<Album>>,
     pub playlists: anyhow::Result<Vec<Playlist>>,
     pub artists: anyhow::Result<Vec<SavedArtist>>,
+    /// The token for the next page of each kind that has one, to hand to
+    /// [`MusicApi::search_more`](crate::MusicApi::search_more).
+    pub more: HashMap<SearchKind, String>,
 }
 
 impl Found {
+    /// Nothing of any kind, with no further pages. A provider fills in what it found.
+    pub fn empty() -> Self {
+        Self {
+            tracks: Ok(Vec::new()),
+            videos: Ok(Vec::new()),
+            albums: Ok(Vec::new()),
+            playlists: Ok(Vec::new()),
+            artists: Ok(Vec::new()),
+            more: HashMap::new(),
+        }
+    }
+
     /// Every kind failed with `error`, for a provider that asks for all of them in one request.
     pub fn failed(error: anyhow::Error) -> Self {
         let again = || anyhow::anyhow!("{error:#}");
         Self {
+            videos: Err(again()),
             albums: Err(again()),
             playlists: Err(again()),
             artists: Err(again()),
             tracks: Err(error),
+            more: HashMap::new(),
         }
     }
 
     /// Whether no kind came back at all.
     pub fn is_failed(&self) -> bool {
         self.tracks.is_err()
+            && self.videos.is_err()
             && self.albums.is_err()
             && self.playlists.is_err()
             && self.artists.is_err()

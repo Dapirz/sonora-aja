@@ -33,7 +33,8 @@ pub use models::{
     Contributor, CoverSize, Credit, Found, Genre, GenreDetail, GenreItem, GenreSection, HomeFeed,
     ImportedPlaylist, Lyrics, LyricsHit, LyricsLane, LyricsLine, LyricsQuery, LyricsWord,
     PinOutcome, PinTarget, PinTargetKind, Playlist, PlaylistDetail, ReleaseType, RomanizedText,
-    SavedArtist, Track, TrackKey, TrackTags, UserDetail, UserProfile, Voice, WritingSystem,
+    SavedArtist, SearchKind, Track, TrackKey, TrackTags, UserDetail, UserProfile, Voice,
+    WritingSystem,
 };
 pub use redact::redact;
 pub use smart::{
@@ -395,6 +396,12 @@ pub trait MusicApi: Send + Sync {
 
     async fn search(&self, query: &str) -> Result<Vec<Track>>;
 
+    /// The music videos the provider finds for `query`, best match first. Only a provider that
+    /// keeps videos apart from its songs answers, so search lists them in a column of their own.
+    async fn search_videos(&self, _query: &str) -> Result<Vec<Track>> {
+        Ok(Vec::new())
+    }
+
     async fn search_albums(&self, _query: &str) -> Result<Vec<Album>> {
         Ok(Vec::new())
     }
@@ -410,22 +417,32 @@ pub trait MusicApi: Send + Sync {
         Ok(Vec::new())
     }
 
-    /// Songs, albums, playlists and artists for `query`, which is what the search page and the
-    /// command line show. The default runs the four searches at once. A provider that can
+    /// Songs, videos, albums, playlists and artists for `query`, which is what the search page
+    /// and the command line show. The default runs the five searches at once. A provider that can
     /// answer every kind in one request overrides it, so a query costs one round trip.
     async fn search_all(&self, query: &str) -> Found {
-        let (tracks, albums, playlists, artists) = futures::join!(
+        let (tracks, videos, albums, playlists, artists) = futures::join!(
             self.search(query),
+            self.search_videos(query),
             self.search_albums(query),
             self.search_playlists(query),
             self.search_artists(query),
         );
         Found {
             tracks,
+            videos,
             albums,
             playlists,
             artists,
+            more: std::collections::HashMap::new(),
         }
+    }
+
+    /// The next page of `kind` for the search that handed out `token`, with only that kind
+    /// filled in and the token for the page after it in `more`. Only a provider that put a
+    /// token in [`Found::more`] is asked.
+    async fn search_more(&self, _kind: SearchKind, _token: &str) -> Result<Found> {
+        anyhow::bail!("this provider has no further search pages")
     }
 
     async fn home(&self) -> Result<HomeFeed> {

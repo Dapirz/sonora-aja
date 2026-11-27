@@ -42,8 +42,11 @@ const SUGGESTED: usize = 6;
 /// How many placeholder rows stand in while the first suggestions load.
 const SUGGESTED_WAITING: usize = 3;
 const ROW_GAP: f32 = 0.25;
+/// How many rows before the end of a list drawing one asks for the next page.
+const AHEAD: usize = 5;
 const BULLET: SharedString = SharedString::new_static("·");
 const SONGS: &[Kind] = &[Kind::Song];
+const VIDEOS: &[Kind] = &[Kind::Video];
 const ARTISTS: &[Kind] = &[Kind::Artist];
 const RELEASES: &[Kind] = &[Kind::Album, Kind::Playlist];
 use crate::shared::tracks::{PlaybackStatus, playback_status};
@@ -61,7 +64,7 @@ enum HitMenu {
 impl HitMenu {
     fn of(hit: &Hit) -> Option<Self> {
         match hit {
-            Hit::Song(track) => Some(Self::Song(track.clone())),
+            Hit::Song(track) | Hit::Video(track) => Some(Self::Song(track.clone())),
             Hit::Album(album) => Some(Self::Album(album.clone())),
             Hit::Playlist(list) => Some(Self::Playlist(list.clone())),
             Hit::Artist(artist) if artist.id.is_some() => Some(Self::Artist(artist.clone())),
@@ -116,6 +119,7 @@ pub(crate) struct SearchView {
     playback: Entity<Playback>,
     playback_status: PlaybackStatus,
     songs: Entity<Scrollbar>,
+    videos: Entity<Scrollbar>,
     artists: Entity<Scrollbar>,
     albums: Entity<Scrollbar>,
     mixed: Entity<Scrollbar>,
@@ -124,7 +128,7 @@ pub(crate) struct SearchView {
     context_menu: Option<(HitMenu, Point<Pixels>)>,
     focus: FocusHandle,
     cursor: Option<(usize, usize)>,
-    rows: [usize; 3],
+    rows: [usize; 4],
     lead: Rc<Cell<Pixels>>,
 }
 
@@ -187,7 +191,7 @@ impl SearchView {
             this.context_menu = None;
             this.cursor = None;
             this.on_best = false;
-            this.rows = [0; 3];
+            this.rows = [0; 4];
             cx.notify();
         })
         .detach();
@@ -226,6 +230,7 @@ impl SearchView {
             playback,
             playback_status: current_playback,
             songs: cx.new(|_| Scrollbar::new(ScrollHandle::new()).watching(me)),
+            videos: cx.new(|_| Scrollbar::new(ScrollHandle::new()).watching(me)),
             artists: cx.new(|_| Scrollbar::new(ScrollHandle::new()).watching(me)),
             albums: cx.new(|_| Scrollbar::new(ScrollHandle::new()).watching(me)),
             mixed: cx.new(|_| Scrollbar::new(ScrollHandle::new()).watching(me)),
@@ -234,7 +239,7 @@ impl SearchView {
             context_menu: None,
             focus: cx.focus_handle(),
             cursor: None,
-            rows: [0; 3],
+            rows: [0; 4],
             lead: Rc::new(Cell::new(Pixels::ZERO)),
         }
     }
@@ -727,7 +732,7 @@ impl SearchView {
     fn open_hit(&mut self, hit: Hit, cx: &mut Context<Self>) {
         hit.remember(cx);
         match hit {
-            Hit::Song(track) => {
+            Hit::Song(track) | Hit::Video(track) => {
                 let current = track.id.is_some() && track.id == self.playback_status.0;
                 self.playback.update(cx, |playback, cx| match current {
                     true => playback.toggle_play(cx),
@@ -845,7 +850,9 @@ impl SearchView {
         cx: &App,
     ) -> Card {
         let current = match hit {
-            Hit::Song(track) => track.id.is_some() && track.id == self.playback_status.0,
+            Hit::Song(track) | Hit::Video(track) => {
+                track.id.is_some() && track.id == self.playback_status.0
+            }
             _ => false,
         };
 
@@ -871,7 +878,7 @@ impl SearchView {
         let me = me.clone();
         let chosen = hit.clone();
         let origin = match hit {
-            Hit::Song(track) => {
+            Hit::Song(track) | Hit::Video(track) => {
                 let current = track.id.is_some() && track.id == self.playback_status.0;
                 let playing = current && self.playback_status.1 == Some(true);
                 let track = track.clone();
@@ -914,7 +921,9 @@ impl SearchView {
         let theme = *cx.theme();
         let hit = self.search.read(cx).best()?;
         let (kind, title, artists) = match hit {
-            Hit::Song(track) => (Kind::Song, track.name.clone(), track.artist_refs.clone()),
+            Hit::Song(track) | Hit::Video(track) => {
+                (hit.kind(), track.name.clone(), track.artist_refs.clone())
+            }
             Hit::Artist(artist) => (Kind::Artist, artist.name.clone(), Vec::new()),
             Hit::Album(album) => (Kind::Album, album.name.clone(), album.artist_refs.clone()),
             Hit::Playlist(list) => (Kind::Playlist, list.name.clone(), Vec::new()),
@@ -1057,6 +1066,7 @@ impl SearchView {
     fn column(&self, kind: Kind, window: &Window, cx: &Context<Self>) -> AnyElement {
         let (id, title, only) = match kind {
             Kind::Song => ("search-songs-heading", t!("nav-songs"), SONGS),
+            Kind::Video => ("search-videos-heading", t!("search-videos"), VIDEOS),
             Kind::Artist => ("search-artists-heading", t!("search-artists"), ARTISTS),
             Kind::Album | Kind::Playlist => (
                 "search-releases-heading",
@@ -1162,6 +1172,7 @@ impl SearchView {
     ) -> AnyElement {
         let (id, bar) = match only {
             [Kind::Song] => ("search-songs", &self.songs),
+            [Kind::Video] => ("search-videos", &self.videos),
             [Kind::Artist] => ("search-artists", &self.artists),
             [Kind::Album, Kind::Playlist] => ("search-albums", &self.albums),
             _ => ("search-all", &self.mixed),
@@ -1196,6 +1207,7 @@ impl SearchView {
         let scroll = bar.read(cx).scroll().clone();
         let me = cx.entity().downgrade();
         let measured = self.lead.clone();
+        let wanted: Vec<Kind> = only.to_vec();
         let deck = Deck::new(format!("{id}-deck"))
             .rows((0..seats.len()).map(|_| row))
             .gap(theme.font_size * ROW_GAP)
@@ -1212,6 +1224,13 @@ impl SearchView {
                 let Some(&(at, place)) = seats.get(index) else {
                     return div().into_any_element();
                 };
+                // A row near the end coming into reach asks for the next page, as the list
+                // nears its end rather than once it is there.
+                let search = view.read(cx).search.clone();
+                if index + AHEAD >= seats.len() && search.read(cx).has_more(&wanted) {
+                    let wanted = wanted.clone();
+                    cx.defer(move |cx| search.update(cx, |search, cx| search.more(&wanted, cx)));
+                }
                 let this = view.read(cx);
                 let Some(hit) = this.search.read(cx).hits().get(at) else {
                     return div().into_any_element();
@@ -1258,7 +1277,7 @@ fn stacked(window: &Window, cx: &App) -> bool {
 fn columns(stacked: bool) -> usize {
     match stacked {
         true => 1,
-        false => 3,
+        false => 4,
     }
 }
 
@@ -1266,7 +1285,8 @@ fn kinds(column: usize, stacked: bool) -> &'static [Kind] {
     match (stacked, column) {
         (true, _) => &Kind::ALL,
         (false, 0) => SONGS,
-        (false, 1) => ARTISTS,
+        (false, 1) => VIDEOS,
+        (false, 2) => ARTISTS,
         _ => RELEASES,
     }
 }
@@ -1274,8 +1294,9 @@ fn kinds(column: usize, stacked: bool) -> &'static [Kind] {
 fn column_of(only: &[Kind]) -> usize {
     match only {
         [Kind::Song] => 0,
-        [Kind::Artist] => 1,
-        [Kind::Album, Kind::Playlist] => 2,
+        [Kind::Video] => 1,
+        [Kind::Artist] => 2,
+        [Kind::Album, Kind::Playlist] => 3,
         _ => 0,
     }
 }
@@ -1283,9 +1304,10 @@ fn column_of(only: &[Kind]) -> usize {
 fn seat(kind: Kind) -> usize {
     match kind {
         Kind::Song => 0,
-        Kind::Artist => 1,
-        Kind::Album => 2,
-        Kind::Playlist => 3,
+        Kind::Video => 1,
+        Kind::Artist => 2,
+        Kind::Album => 3,
+        Kind::Playlist => 4,
     }
 }
 
@@ -1307,7 +1329,7 @@ fn pressed(
     move |_, window, cx| {
         hit.remember(cx);
         me.update(cx, |this, cx| match &hit {
-            Hit::Song(track) => {
+            Hit::Song(track) | Hit::Video(track) => {
                 this.playback
                     .update(cx, |playback, cx| playback.play_radio(track, cx));
                 this.leave_field(window, cx);
@@ -1390,7 +1412,7 @@ fn artist_of(hit: &ArtistHit, cx: &App) -> SavedArtist {
 
 fn cover(hit: &Hit) -> Option<String> {
     match hit {
-        Hit::Song(track) => track.cover.clone(),
+        Hit::Song(track) | Hit::Video(track) => track.cover.clone(),
         Hit::Artist(artist) => artist.cover.clone(),
         Hit::Album(album) => album.cover.clone(),
         Hit::Playlist(list) => list.cover.clone(),
@@ -1399,7 +1421,7 @@ fn cover(hit: &Hit) -> Option<String> {
 
 fn meta(hit: &Hit, compact: bool) -> SharedString {
     match hit {
-        Hit::Song(track) => SharedString::from(track.artists.clone()),
+        Hit::Song(track) | Hit::Video(track) => SharedString::from(track.artists.clone()),
         Hit::Album(album) => SharedString::from(album.artists.clone()),
         Hit::Artist(artist) => match compact {
             true => noun(Kind::Artist),
@@ -1424,20 +1446,25 @@ pub(crate) fn hit_card(
 ) -> Card {
     let meta = subtitle(hit, place, compact, theme);
     let card = match hit {
-        Hit::Song(track) => Card::new(("song", place), track.name.clone())
-            .cover(track.cover.clone())
-            .fallback("icons/music.svg")
-            .when(current, |card| card.tint(theme.primary))
-            .when(track.explicit, |card| card.explicit())
-            .trailing(
-                div()
-                    .flex_none()
-                    .whitespace_nowrap()
-                    .text_size(theme.text(Text::Small))
-                    .text_color(theme.muted_foreground)
-                    .font_features(tabular())
-                    .child(clock(track.duration)),
-            ),
+        Hit::Song(track) | Hit::Video(track) => {
+            Card::new((noun_id(hit), place), track.name.clone())
+                .cover(track.cover.clone())
+                .fallback(match hit {
+                    Hit::Video(_) => "icons/tv.svg",
+                    _ => "icons/music.svg",
+                })
+                .when(current, |card| card.tint(theme.primary))
+                .when(track.explicit, |card| card.explicit())
+                .trailing(
+                    div()
+                        .flex_none()
+                        .whitespace_nowrap()
+                        .text_size(theme.text(Text::Small))
+                        .text_color(theme.muted_foreground)
+                        .font_features(tabular())
+                        .child(clock(track.duration)),
+                )
+        }
         Hit::Artist(artist) => Card::new(("artist", place), artist.name.clone())
             .cover(artist.cover.clone())
             .fallback("icons/user.svg")
@@ -1476,9 +1503,9 @@ fn subtitle(hit: &Hit, place: usize, compact: bool, theme: &Theme) -> AnyElement
 
     let muted = theme.muted_foreground;
     let (kind, id, artists, fallback) = match hit {
-        Hit::Song(track) => (
-            Kind::Song,
-            format!("song-artist-{place}"),
+        Hit::Song(track) | Hit::Video(track) => (
+            hit.kind(),
+            format!("{}-artist-{place}", noun_id(hit)),
             track.artist_refs.clone(),
             track.artists.clone(),
         ),
@@ -1533,6 +1560,15 @@ fn subtitle(hit: &Hit, place: usize, compact: bool, theme: &Theme) -> AnyElement
         .into_any_element()
 }
 
+/// The stem of a track hit's element ids, kept apart for songs and videos so the two columns
+/// never share an id.
+fn noun_id(hit: &Hit) -> &'static str {
+    match hit {
+        Hit::Video(_) => "video",
+        _ => "song",
+    }
+}
+
 pub(crate) fn tag(kind: Kind) -> SharedString {
     let noun = noun(kind);
     t!("search-tag", kind = &noun)
@@ -1548,6 +1584,7 @@ fn held(saved: usize) -> SharedString {
 pub(crate) fn noun(kind: Kind) -> SharedString {
     match kind {
         Kind::Song => t!("kind-song"),
+        Kind::Video => t!("kind-video"),
         Kind::Artist => t!("kind-artist"),
         Kind::Album => t!("kind-album"),
         Kind::Playlist => t!("kind-playlist"),
@@ -1613,6 +1650,8 @@ impl Render for SearchView {
                     .min_h_0()
                     .px(gutter)
                     .child(self.column(Kind::Song, window, cx))
+                    .child(Separator::vertical())
+                    .child(self.column(Kind::Video, window, cx))
                     .child(Separator::vertical())
                     .child(self.column(Kind::Artist, window, cx))
                     .child(Separator::vertical())

@@ -121,6 +121,7 @@ genre-empty = Belum ada yang bisa ditampilkan di sini
 search-best-match = Hasil teratas
 search-no-matches = Tidak ada hasil yang cocok
 search-results = Hasil pencarian
+search-videos = Video
 search-artists = Artis
 search-albums-playlists = Album & playlist
 search-tag = { $kind } ·

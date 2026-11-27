@@ -133,6 +133,7 @@ genre-empty = Nothing to show here yet
 search-best-match = Best match
 search-no-matches = No matches
 search-results = Results
+search-videos = Videos
 search-artists = Artists
 search-albums-playlists = Albums & playlists
 search-tag = { $kind } ·

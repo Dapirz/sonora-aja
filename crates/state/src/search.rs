@@ -1,10 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use anyhow::Result;
 use gpui::{App, Context, Entity, Task};
 use music::link::{self, Linked};
-use music::{Album, ArtistRef, Found, MusicApi, Playlist, SavedArtist, Track};
+use music::{Album, ArtistRef, Found, MusicApi, Playlist, SavedArtist, SearchKind, Track};
 use serde::{Deserialize, Serialize};
 use tokio::task::AbortHandle;
 
@@ -28,13 +28,32 @@ const MINE: u32 = 60;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Song,
+    /// A music video, which plays as audio like a song but is listed apart from the songs.
+    Video,
     Artist,
     Album,
     Playlist,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 4] = [Kind::Song, Kind::Artist, Kind::Album, Kind::Playlist];
+    /// The provider's search kind this kind's hits come from.
+    fn searched(self) -> SearchKind {
+        match self {
+            Kind::Song => SearchKind::Tracks,
+            Kind::Video => SearchKind::Videos,
+            Kind::Artist => SearchKind::Artists,
+            Kind::Album => SearchKind::Albums,
+            Kind::Playlist => SearchKind::Playlists,
+        }
+    }
+
+    pub const ALL: [Kind; 5] = [
+        Kind::Song,
+        Kind::Video,
+        Kind::Artist,
+        Kind::Album,
+        Kind::Playlist,
+    ];
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -67,6 +86,7 @@ pub struct PlaylistHit {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Hit {
     Song(Box<Track>),
+    Video(Box<Track>),
     Artist(ArtistHit),
     Album(AlbumHit),
     Playlist(PlaylistHit),
@@ -76,6 +96,7 @@ impl Hit {
     pub fn kind(&self) -> Kind {
         match self {
             Hit::Song(_) => Kind::Song,
+            Hit::Video(_) => Kind::Video,
             Hit::Artist(_) => Kind::Artist,
             Hit::Album(_) => Kind::Album,
             Hit::Playlist(_) => Kind::Playlist,
@@ -86,7 +107,7 @@ impl Hit {
     /// none, and the search history does not keep such a hit.
     pub fn id(&self) -> Option<&str> {
         match self {
-            Hit::Song(track) => track.id.as_deref(),
+            Hit::Song(track) | Hit::Video(track) => track.id.as_deref(),
             Hit::Artist(artist) => artist.id.as_deref(),
             Hit::Album(album) => Some(&album.id),
             Hit::Playlist(list) => Some(&list.id),
@@ -98,6 +119,7 @@ impl Hit {
     pub fn key(&self) -> String {
         let (kind, name) = match self {
             Hit::Song(track) => ("song", &track.name),
+            Hit::Video(track) => ("video", &track.name),
             Hit::Artist(artist) => ("artist", &artist.name),
             Hit::Album(album) => ("album", &album.name),
             Hit::Playlist(list) => ("playlist", &list.name),
@@ -143,14 +165,41 @@ impl Hit {
 #[derive(Default)]
 pub(crate) struct Catalog {
     pub(crate) tracks: Vec<Track>,
+    pub(crate) videos: Vec<Track>,
     pub(crate) albums: Vec<Album>,
     pub(crate) playlists: Vec<Playlist>,
     pub(crate) artists: Vec<SavedArtist>,
+    /// What later pages added, listed after the ranked first page.
+    pub(crate) paged: Paged,
+}
+
+/// What later pages of a search found. These are not ranked against the first page but listed
+/// after it in the provider's order, so a page arriving never moves the rows already on screen.
+#[derive(Default)]
+pub(crate) struct Paged {
+    tracks: Vec<Track>,
+    videos: Vec<Track>,
+    albums: Vec<Album>,
+    playlists: Vec<Playlist>,
+    artists: Vec<SavedArtist>,
+}
+
+impl Paged {
+    /// Adds what one further page `found`, of one kind, holds.
+    fn add(&mut self, found: Found) {
+        self.tracks.extend(found.tracks.unwrap_or_default());
+        self.videos.extend(found.videos.unwrap_or_default());
+        self.albums.extend(found.albums.unwrap_or_default());
+        self.playlists.extend(found.playlists.unwrap_or_default());
+        self.artists.extend(found.artists.unwrap_or_default());
+    }
 }
 
 impl Catalog {
     fn clear(&mut self) {
+        self.paged = Paged::default();
         self.tracks.clear();
+        self.videos.clear();
         self.albums.clear();
         self.playlists.clear();
         self.artists.clear();
@@ -158,6 +207,7 @@ impl Catalog {
 
     fn is_empty(&self) -> bool {
         self.tracks.is_empty()
+            && self.videos.is_empty()
             && self.albums.is_empty()
             && self.playlists.is_empty()
             && self.artists.is_empty()
@@ -215,6 +265,10 @@ pub struct Search {
     io: Io,
     task: Option<Task<()>>,
     faces: Option<Task<()>>,
+    /// The token for the next page of each kind the provider has more of.
+    more: HashMap<SearchKind, String>,
+    /// The further pages on their way, by kind.
+    paging: HashMap<SearchKind, Task<()>>,
 }
 
 impl Search {
@@ -255,6 +309,8 @@ impl Search {
             io,
             task: None,
             faces: None,
+            more: HashMap::new(),
+            paging: HashMap::new(),
         }
     }
 
@@ -283,6 +339,61 @@ impl Search {
         self.loading
     }
 
+    /// Whether the provider has a further page of any of `kinds`, or one is on its way.
+    pub fn has_more(&self, kinds: &[Kind]) -> bool {
+        kinds.iter().any(|kind| {
+            let searched = kind.searched();
+            self.more.contains_key(&searched) || self.paging.contains_key(&searched)
+        })
+    }
+
+    /// Asks the provider for the next page of each of `kinds` that has one and is not already
+    /// on its way. What arrives is listed after the hits already shown.
+    pub fn more(&mut self, kinds: &[Kind], cx: &mut Context<Self>) {
+        let Some(client) = self.session.read(cx).client() else {
+            return;
+        };
+        for kind in kinds {
+            let kind = kind.searched();
+            if self.paging.contains_key(&kind) {
+                continue;
+            }
+            let Some(token) = self.more.remove(&kind) else {
+                continue;
+            };
+            let query = self.query.clone();
+            let client = client.clone();
+            let request = self
+                .io
+                .spawn(async move { client.search_more(kind, &token).await });
+            let task = cx.spawn(async move |this, cx| {
+                let _abort = Abort(request.abort_handle());
+                let found = join(request).await;
+                this.update(cx, |this, cx| {
+                    if this.query != query {
+                        return;
+                    }
+                    this.paging.remove(&kind);
+                    match found {
+                        Ok(mut found) => {
+                            if let Some(next) = found.more.remove(&kind) {
+                                this.more.insert(kind, next);
+                            }
+                            this.catalog.paged.add(found);
+                            this.rank(cx);
+                        }
+                        Err(error) => {
+                            log::warn!("search: cannot load more {kind:?}: {error:#}");
+                            cx.notify();
+                        }
+                    }
+                })
+                .ok();
+            });
+            self.paging.insert(kind, task);
+        }
+    }
+
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
     }
@@ -290,6 +401,8 @@ impl Search {
     fn forget_results(&mut self) {
         self.task = None;
         self.faces = None;
+        self.more.clear();
+        self.paging.clear();
         self.query.clear();
         self.served = None;
         self.matching.clear();
@@ -314,6 +427,9 @@ impl Search {
         self.linked = None;
         self.error = None;
         self.task = None;
+        self.more.clear();
+        self.paging.clear();
+        self.catalog.paged = Paged::default();
         let linked = self.session.read(cx).read_link(&query);
         if linked.is_some() {
             self.matching.clear();
@@ -416,16 +532,21 @@ impl Search {
                 let mut trouble = Vec::new();
                 let Catalog {
                     tracks,
+                    videos: kept_videos,
                     albums: kept_albums,
                     playlists: kept_playlists,
                     artists: kept_artists,
+                    ..
                 } = std::mem::take(&mut this.catalog);
                 this.catalog = Catalog {
+                    paged: Paged::default(),
                     tracks: salvaged(found.tracks, tracks, &mut trouble),
+                    videos: salvaged(found.videos, kept_videos, &mut trouble),
                     albums: salvaged(found.albums, kept_albums, &mut trouble),
                     playlists: salvaged(found.playlists, kept_playlists, &mut trouble),
                     artists: salvaged(found.artists, kept_artists, &mut trouble),
                 };
+                this.more = found.more;
                 match trouble.first() {
                     Some(reason) => Network::failed(reason, cx),
                     None => {
@@ -449,7 +570,7 @@ impl Search {
             .filter_map(|hit| match hit {
                 Hit::Artist(artist) if artist.cover.is_none() => artist.id.clone(),
                 Hit::Artist(_) => None,
-                Hit::Song(_) | Hit::Album(_) | Hit::Playlist(_) => None,
+                Hit::Song(_) | Hit::Video(_) | Hit::Album(_) | Hit::Playlist(_) => None,
             })
             .filter(|id| !self.portraits.contains_key(id))
             .collect();
@@ -549,7 +670,7 @@ async fn linked_hit(client: &dyn MusicApi, linked: Linked) -> Result<Hit> {
 
 fn hit_name(hit: &Hit) -> &str {
     match hit {
-        Hit::Song(track) => &track.name,
+        Hit::Song(track) | Hit::Video(track) => &track.name,
         Hit::Artist(artist) => &artist.name,
         Hit::Album(album) => &album.name,
         Hit::Playlist(playlist) => &playlist.name,
@@ -559,7 +680,9 @@ fn hit_name(hit: &Hit) -> &str {
 /// Compares provider ids so the linked item appears only once in the suggestions.
 fn same_hit(left: &Hit, right: &Hit) -> bool {
     match (left, right) {
-        (Hit::Song(left), Hit::Song(right)) => left.id.is_some() && left.id == right.id,
+        (Hit::Song(left), Hit::Song(right)) | (Hit::Video(left), Hit::Video(right)) => {
+            left.id.is_some() && left.id == right.id
+        }
         (Hit::Artist(left), Hit::Artist(right)) => left.id.is_some() && left.id == right.id,
         (Hit::Album(left), Hit::Album(right)) => left.id == right.id,
         (Hit::Playlist(left), Hit::Playlist(right)) => left.id == right.id,
@@ -584,12 +707,68 @@ pub(crate) fn rank(
     }
 
     let mut all = songs(library, &catalog.tracks, &query);
+    all.extend(videos(library, &catalog.videos, &query));
     all.extend(artists(library, catalog, albums, portraits, &query));
     all.extend(albums_of(albums, library, catalog, &query));
     all.extend(playlists_of(playlists, &catalog.playlists, &query));
     order(&mut all);
 
-    all.into_iter().map(|scored| scored.hit).collect()
+    let mut hits: Vec<Hit> = all.into_iter().map(|scored| scored.hit).collect();
+    let mut seen: HashSet<String> = hits.iter().map(Hit::key).collect();
+    for hit in later(library, &catalog.paged) {
+        if seen.insert(hit.key()) {
+            hits.push(hit);
+        }
+    }
+    hits
+}
+
+/// The hits of later pages, in the provider's order. A song the library keeps is left out, as
+/// it is from the first page.
+fn later(library: &[Track], paged: &Paged) -> Vec<Hit> {
+    let fresh = |track: &&Track| !kept(library, track);
+    let songs = paged
+        .tracks
+        .iter()
+        .filter(fresh)
+        .map(|track| Hit::Song(Box::new(track.clone())));
+    let videos = paged
+        .videos
+        .iter()
+        .filter(fresh)
+        .map(|track| Hit::Video(Box::new(track.clone())));
+    let albums = paged.albums.iter().map(|album| {
+        Hit::Album(AlbumHit {
+            id: album.id.clone(),
+            name: album.name.clone(),
+            artists: album.artists.clone(),
+            artist_refs: album.artist_refs.clone(),
+            cover: album.cover.clone(),
+            year: album.year,
+        })
+    });
+    let playlists = paged.playlists.iter().map(|list| {
+        Hit::Playlist(PlaylistHit {
+            id: list.id.clone(),
+            name: list.name.clone(),
+            owner: list.owner.clone(),
+            cover: list.cover.clone(),
+        })
+    });
+    let artists = paged.artists.iter().map(|artist| {
+        Hit::Artist(ArtistHit {
+            name: artist.name.clone(),
+            id: Some(artist.id.clone()),
+            cover: artist.cover.clone(),
+            saved: 0,
+        })
+    });
+    songs
+        .chain(videos)
+        .chain(albums)
+        .chain(playlists)
+        .chain(artists)
+        .collect()
 }
 
 /// The hits of `kind` for `asked` in the local library alone, best first and at most `take` of
@@ -638,6 +817,35 @@ fn songs(library: &[Track], catalog: &[Track], query: &Query) -> Vec<Scored> {
             score,
             popularity: track.popularity,
             hit: Hit::Song(Box::new(track.clone())),
+        });
+    }
+
+    capped(scored)
+}
+
+/// The provider's videos that fit `query`, ranked by their place in its answer as found songs
+/// are. A video the library keeps is listed among the songs instead.
+fn videos(library: &[Track], catalog: &[Track], query: &Query) -> Vec<Scored> {
+    let total = catalog.len();
+    let mut scored: Vec<Scored> = Vec::new();
+
+    for (at, track) in catalog.iter().enumerate() {
+        if kept(library, track) {
+            continue;
+        }
+        let rank = Some(placed(at, total));
+        let fields = [
+            (TITLE, track.name.as_str()),
+            (ARTIST, track.artists.as_str()),
+        ];
+        let Some(score) = favored(fit(&fields, query), rank).max(rank) else {
+            continue;
+        };
+
+        scored.push(Scored {
+            score,
+            popularity: track.popularity,
+            hit: Hit::Video(Box::new(track.clone())),
         });
     }
 

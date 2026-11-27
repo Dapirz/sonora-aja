@@ -180,6 +180,7 @@ release-ep = EP
 release-audiobook = Audiobook
 release-podcast = Podcast
 kind-song = Song
+kind-video = Video
 kind-artist = Artist
 kind-album = Album
 kind-playlist = Playlist
