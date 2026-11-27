@@ -690,6 +690,7 @@ fn translate(event: PlayerEvent) -> Option<PlaybackEvent> {
         PlayerEvent::Unavailable { track_id: uri, .. } => Some(PlaybackEvent::Unavailable {
             id: track_id(uri),
             timed_out: false,
+            reason: "spotify could not play the track".to_owned(),
         }),
         _ => None,
     }

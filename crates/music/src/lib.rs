@@ -715,9 +715,12 @@ pub enum PlaybackEvent {
     },
     /// Track `id` could not be loaded. `timed_out` says the host it came from never answered in
     /// time, so the listener can be pointed at their connection rather than at the track.
+    /// `reason` is the failure in developer English, which tells a lost connection from a track
+    /// the provider would not serve.
     Unavailable {
         id: Option<String>,
         timed_out: bool,
+        reason: String,
     },
     /// The provider turned the load down for now, as it does under a rate limit, so the same
     /// track may play after a wait.

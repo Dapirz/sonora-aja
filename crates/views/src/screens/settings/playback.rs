@@ -6,11 +6,12 @@ use gpui::{AnyElement, App, Context, Div, MouseUpEvent, SharedString, Window, di
 use i18n::t;
 use music::drm::Origin;
 use music::{Codec, Encoding, Offer, Quality, Transcode};
-use state::{CdmState, Sleep, SoloistState};
+use state::{CdmState, Handling, PlaybackProblem, Sleep, SoloistState, Trouble};
 use ui::{ActiveTheme as _, Button, MenuItem, OptionCard, Picker, Scrubber, Switch, Text};
 
 use super::rows::{Announced as _, grid, segmented};
 use super::{Group, SettingsView, Slot};
+use crate::shared::cells;
 use crate::shared::confirm::{Confirm, Kind};
 
 /// How many quality cards a row is laid out for, however few levels a service has.
@@ -57,9 +58,75 @@ impl SettingsView {
         if self.soloist.read(cx).shown(cx) {
             groups.push(Group::new("settings-group-soloist").rows([Slot::Soloist]));
         }
+        groups.push(Group::new("settings-group-problems").rows([Slot::PlaybackProblems]));
         groups.extend(self.sessions_groups(cx));
         groups.extend(self.connect_groups(cx));
         groups
+    }
+
+    /// What went wrong while playing since Sonora started, newest first: when, which song, what
+    /// happened and what playback did about it. The log holds the provider's own words for each.
+    pub(super) fn problems_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = *cx.theme();
+        let problems: Vec<PlaybackProblem> = self.playback.read(cx).problems().cloned().collect();
+        if problems.is_empty() {
+            return ui::spoken("playback-problems-none", t!("settings-problems-none"))
+                .flex()
+                .items_center()
+                .h(theme.metrics.list_row)
+                .text_color(theme.muted_foreground)
+                .into_any_element();
+        }
+
+        let count = problems.len();
+        let items = problems.into_iter().enumerate().map(|(index, problem)| {
+            let title: SharedString = match problem.artists.is_empty() {
+                true => problem.track.clone().into(),
+                false => t!(
+                    "settings-problem-track",
+                    track = problem.track.as_str(),
+                    artists = problem.artists.as_str()
+                ),
+            };
+            let when = cells::relative_stamp(Some(problem.at));
+            let what = trouble_label(problem.trouble);
+            let done = handling_label(problem.handling);
+            let detail = t!(
+                "settings-problem-detail",
+                when = &when,
+                what = &what,
+                done = &done
+            );
+
+            div()
+                .id(("playback-problem", problem.id as usize))
+                .role(Role::ListItem)
+                .aria_label(SharedString::from(format!("{title}. {detail}")))
+                .aria_position_in_set(index + 1)
+                .aria_size_of_set(count)
+                .flex()
+                .flex_col()
+                .justify_center()
+                .min_h(theme.metrics.list_row)
+                .child(div().min_w_0().truncate().child(title))
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(theme.text(Text::Label))
+                        .text_color(theme.muted_foreground)
+                        .child(detail),
+                )
+        });
+
+        div()
+            .id("playback-problems")
+            .role(Role::List)
+            .aria_label(t!("settings-problems"))
+            .flex()
+            .flex_col()
+            .children(items)
+            .into_any_element()
     }
 
     /// The detail of the Widevine row for its state, which a search reads.
@@ -715,4 +782,24 @@ fn signal(rank: usize, steps: usize, cx: &App) -> Div {
                     false => theme.muted,
                 })
         }))
+}
+
+/// What went wrong with a track, as the list of playback problems says it.
+fn trouble_label(trouble: Trouble) -> SharedString {
+    match trouble {
+        Trouble::Network => t!("problem-network"),
+        Trouble::Track => t!("problem-track"),
+        Trouble::CutShort => t!("problem-cut-short"),
+    }
+}
+
+/// What playback did about a problem, as the list of playback problems says it.
+fn handling_label(handling: Handling) -> SharedString {
+    match handling {
+        Handling::Waiting => t!("problem-waiting"),
+        Handling::Resumed => t!("problem-resumed"),
+        Handling::Retrying(attempt) => t!("problem-retrying", attempt = attempt),
+        Handling::Skipped => t!("problem-skipped"),
+        Handling::Stopped => t!("problem-stopped"),
+    }
 }

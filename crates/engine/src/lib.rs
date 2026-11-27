@@ -730,6 +730,7 @@ async fn engine_loop<F: Fetch>(
                                 (false, false) => PlaybackEvent::Unavailable {
                                     id: Some(id),
                                     timed_out: music::trouble::timed_out(&format!("{error:#}")),
+                                    reason: format!("{error:#}"),
                                 },
                             };
                             events.send(refusal).ok();
@@ -1227,6 +1228,7 @@ fn audio_loop<F: Fetch>(
                                 .send(PlaybackEvent::Unavailable {
                                     id: Some(id),
                                     timed_out: false,
+                                    reason: "the track could not be decoded".to_owned(),
                                 })
                                 .ok();
                         }
@@ -1291,6 +1293,7 @@ fn audio_loop<F: Fetch>(
                             .send(PlaybackEvent::Unavailable {
                                 id: Some(join.ended),
                                 timed_out: false,
+                                reason: "the track could not be reopened to seek".to_owned(),
                             })
                             .ok();
                         continue;
@@ -1325,6 +1328,8 @@ fn audio_loop<F: Fetch>(
                                         .send(PlaybackEvent::Unavailable {
                                             id: Some(id),
                                             timed_out: false,
+                                            reason: "the track could not be reopened to seek"
+                                                .to_owned(),
                                         })
                                         .ok();
                                     continue;

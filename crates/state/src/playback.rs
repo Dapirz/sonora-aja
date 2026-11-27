@@ -64,7 +64,7 @@ use serde::{Deserialize, Serialize};
 use crate::devices::collection_of;
 use crate::{
     AppSettings, Devices, Elsewhere, Equalizer, Io, Network, Outcome, QueueKind, QueuePosition,
-    Session, SessionEvent, SessionState, Sonora, Target, Toast, Toasts,
+    Reconnected, Session, SessionEvent, SessionState, Sonora, Target, Toast, Toasts,
 };
 
 const POSITION_INTERVAL: Duration = Duration::from_millis(500);
@@ -89,9 +89,19 @@ const KEY_COOLDOWN: Duration = Duration::from_secs(1);
 /// echo of an earlier press rather than news. Past it the engine is believed again, so a pause
 /// the engine makes on its own is not lost for good.
 const ECHO_WINDOW: Duration = Duration::from_secs(2);
-/// How many loads in a row may fail before the queue stops moving on by itself and waits for
-/// play.
+/// The fewest loads in a row that may fail before the queue stops moving on by itself and waits
+/// for play. A longer queue goes on until every song in it has failed once.
 const FAILURE_LIMIT: u8 = 3;
+/// How many times a track that would not load, or stopped partway, is asked for again before the
+/// queue moves on. Each try waits the matching `RETRY_WAIT`, so a host that hiccupped has time
+/// to recover.
+const RETRY_LIMIT: u8 = 2;
+const RETRY_WAIT: [Duration; 2] = [Duration::from_secs(2), Duration::from_secs(5)];
+/// How far short of its length a track may end before the end is taken for a stream that broke
+/// rather than the song finishing. Reported lengths and the audio differ by a second or two.
+const CUT_SHORT: Duration = Duration::from_secs(8);
+/// How many playback problems the list keeps, newest first.
+const PROBLEMS_KEPT: usize = 50;
 /// The wait before a track the provider turned down for now is asked for again. Each refusal in
 /// a row doubles it, up to `THROTTLE_CAP`.
 const THROTTLE_WAIT: Duration = Duration::from_secs(2);
@@ -260,6 +270,46 @@ pub enum PlaybackState {
     Loading,
     /// Nothing plays and this is why, in developer English.
     Failed(String),
+}
+
+/// What went wrong with a track, for the list of playback problems.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Trouble {
+    /// The network went away, or the host never answered.
+    Network,
+    /// The provider or its stream host would not serve the track, or it would not decode.
+    Track,
+    /// The track stopped partway, as a stream that broke leaves it.
+    CutShort,
+}
+
+/// What playback did about a problem.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Handling {
+    /// It holds the track where it stopped until the network is back.
+    Waiting,
+    /// The network came back and the track picked up where it stopped.
+    Resumed,
+    /// It asks for the track again; this is try `n` of `RETRY_LIMIT`.
+    Retrying(u8),
+    /// It gave up on the track and moved on to the next one.
+    Skipped,
+    /// Every song in the queue failed, so it stopped and waits for play.
+    Stopped,
+}
+
+/// One playback problem since the app started: when, which track, what went wrong and what
+/// playback did about it. The log holds the provider's own words for it.
+#[derive(Clone, Debug)]
+pub struct PlaybackProblem {
+    /// Tells one problem from another for as long as the app runs.
+    pub id: u64,
+    /// Seconds since the Unix epoch.
+    pub at: i64,
+    pub track: String,
+    pub artists: String,
+    pub trouble: Trouble,
+    pub handling: Handling,
 }
 
 /// Why a streaming track cannot play while the network is gone. Each reason is the Fluent key
@@ -668,6 +718,14 @@ pub struct Playback {
     /// Loads the provider turned down for now since audio last played or the user last picked a
     /// track. It sets how long the next retry waits.
     throttles: u8,
+    /// Times the current track was asked for again after it failed or stopped partway.
+    retries: u8,
+    /// The track held where it stopped until the network is back.
+    waiting: Option<(Track, Duration)>,
+    /// What went wrong while playing, newest first, at most `PROBLEMS_KEPT`.
+    problems: VecDeque<PlaybackProblem>,
+    /// How many problems have been noted, which numbers the next one.
+    noted: u64,
     /// When the engine last reported a pause. It is wall-clock time so a suspend counts toward
     /// `STALE_PAUSE`, and a clock set back counts as stale.
     paused_at: Option<SystemTime>,
@@ -726,8 +784,13 @@ impl Playback {
         queue: Entity<Queue>,
         settings: Entity<AppSettings>,
         equalizer: &Entity<Equalizer>,
+        network: &Entity<Network>,
         cx: &mut Context<Self>,
     ) -> Self {
+        cx.subscribe(network, |this, _, _: &Reconnected, cx| {
+            this.network_back(cx)
+        })
+        .detach();
         // An engine can run a program of its own, as Soloist does. Letting go of the engine
         // stops it, and the app waits for that before it is gone.
         cx.on_app_quit(|this, _| {
@@ -851,6 +914,10 @@ impl Playback {
             blocked_until: None,
             failures: 0,
             throttles: 0,
+            retries: 0,
+            waiting: None,
+            problems: VecDeque::new(),
+            noted: 0,
             paused_at: None,
             refused: None,
             resume_at: None,
@@ -1177,8 +1244,14 @@ impl Playback {
         if !track.playable {
             return self.failed(format!("{} is not available to stream", track.name), cx);
         }
+        self.waiting = None;
         if let Some(reason) = self.reason(&id, cx) {
-            return Self::unreachable(reason, start, cx);
+            return match reason {
+                Unreachable::Offline => {
+                    self.wait_for_network(track.clone(), at, "the network is gone", cx)
+                }
+                reason => Self::unreachable(reason, start, cx),
+            };
         }
         if self.engine_for(&id).is_none() {
             return;
@@ -1186,6 +1259,9 @@ impl Playback {
         self.silence_other(&id);
         if !matches!(start, Start::Segue | Start::Retry) {
             self.failures = 0;
+        }
+        if start != Start::Retry {
+            self.retries = 0;
         }
         if start == Start::Pick {
             self.throttles = 0;
@@ -2702,6 +2778,16 @@ impl Playback {
                 .is_some_and(|pressed| pressed.elapsed() < ECHO_WINDOW)
     }
 
+    /// What went wrong while playing since the app started, newest first.
+    pub fn problems(&self) -> impl ExactSizeIterator<Item = &PlaybackProblem> {
+        self.problems.iter()
+    }
+
+    /// Whether the current track is held until the network is back.
+    pub fn waiting_for_network(&self) -> bool {
+        self.waiting.is_some()
+    }
+
     pub fn wants_playing(&self) -> bool {
         self.intent == Intent::Play && self.track.is_some()
     }
@@ -3557,6 +3643,10 @@ impl Playback {
                 }
             }
             BackendEvent::Ended { .. } => {
+                if self.picked_up(cx) {
+                    cx.notify();
+                    return;
+                }
                 let ended = self.track.take();
                 self.ends += 1;
                 self.state = PlaybackState::Idle;
@@ -3583,6 +3673,15 @@ impl Playback {
                 self.state = PlaybackState::Loading;
                 log::warn!("playback: the provider went stale, waiting for a reconnect");
             }
+            BackendEvent::Unavailable {
+                timed_out, reason, ..
+            } if self.offline_trouble(timed_out, &reason, cx) => {
+                if let Some(track) = self.track.clone() {
+                    let at = self.position;
+                    self.wait_for_network(track, at, &reason, cx);
+                }
+            }
+            BackendEvent::Unavailable { reason, .. } if self.retry_failed(&reason, cx) => {}
             BackendEvent::Unavailable { timed_out, .. } => {
                 let failed = self.track.take();
                 let target = failed.as_ref().and_then(song_target);
@@ -3598,10 +3697,23 @@ impl Playback {
                 self.state = PlaybackState::Idle;
                 self.position = Duration::ZERO;
                 self.clock.reset(Duration::ZERO, false);
-                let exhausted = self.failures >= FAILURE_LIMIT;
+                let everything = self
+                    .queue
+                    .read(cx)
+                    .tracks()
+                    .count()
+                    .clamp(usize::from(FAILURE_LIMIT), usize::from(u8::MAX));
+                let exhausted = usize::from(self.failures) >= everything;
+                if let Some(track) = &failed {
+                    let handling = match exhausted {
+                        true => Handling::Stopped,
+                        false => Handling::Skipped,
+                    };
+                    self.note(track, Trouble::Track, handling);
+                }
                 match exhausted {
                     true => {
-                        log::warn!("playback: {FAILURE_LIMIT} tracks failed in a row, stopping");
+                        log::warn!("playback: every song in the queue failed, stopping");
                         match timed_out || !self.module_suspect(cx) {
                             true => Toasts::show(
                                 Outcome::Failed,
@@ -3665,6 +3777,7 @@ impl Playback {
     fn teardown(&mut self, cx: &mut Context<Self>) {
         self.task = None;
         self.engine = None;
+        self.waiting = None;
         self.signals.retain(|(id, _)| music::is_local_id(id));
 
         if !self.local_active() {
@@ -3705,6 +3818,142 @@ impl Playback {
         log::error!("playback: {problem}");
         self.state = PlaybackState::Failed(problem);
         cx.notify();
+    }
+
+    /// Files a problem at the top of the list and in the log's terms, dropping the oldest past
+    /// `PROBLEMS_KEPT`.
+    fn note(&mut self, track: &Track, trouble: Trouble, handling: Handling) {
+        let at = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs() as i64);
+        self.problems.truncate(PROBLEMS_KEPT - 1);
+        self.noted += 1;
+        self.problems.push_front(PlaybackProblem {
+            id: self.noted,
+            at,
+            track: track.name.clone(),
+            artists: track.artists.clone(),
+            trouble,
+            handling,
+        });
+    }
+
+    /// Whether a load that failed with `reason` failed for want of a network, so waiting for it
+    /// beats moving on to songs that would fail the same way. A local file needs none.
+    fn offline_trouble(&self, timed_out: bool, reason: &str, cx: &App) -> bool {
+        let streams = self
+            .track
+            .as_ref()
+            .and_then(|track| track.id.as_deref())
+            .is_some_and(|id| !music::is_local_id(id));
+        streams && (timed_out || music::trouble::offline(reason) || Network::lost(cx))
+    }
+
+    /// Holds `track` at `at` until the network is back, rather than skipping songs that would
+    /// all fail the same way. The network checks by itself until it is back, and then the
+    /// track picks up from there. The engine is paused, so a song it lined up behind this one
+    /// does not play on meanwhile.
+    fn wait_for_network(
+        &mut self,
+        track: Track,
+        at: Duration,
+        reason: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let first = !Network::lost(cx);
+        log::warn!(
+            "playback: the network is gone ({reason}), holding {} at {}s until it is back",
+            track.name,
+            at.as_secs()
+        );
+        if let Some(engine) = self.engine.as_deref() {
+            engine.unline();
+            engine.pause();
+        }
+        self.note(&track, Trouble::Network, Handling::Waiting);
+        self.track = Some(track.clone());
+        self.waiting = Some((track, at));
+        self.load = None;
+        self.state = PlaybackState::Loading;
+        self.position = at;
+        self.clock.reset(at, false);
+        Network::lose(reason, cx);
+        if first {
+            Toasts::show(Outcome::Failed, "toast-waiting-for-network", cx);
+        }
+        cx.notify();
+    }
+
+    /// Picks up the track held for the network, now that it is back, where it stopped.
+    fn network_back(&mut self, cx: &mut Context<Self>) {
+        let Some((track, at)) = self.waiting.take() else {
+            return;
+        };
+        log::info!(
+            "playback: the network is back, picking {} up at {}s",
+            track.name,
+            at.as_secs()
+        );
+        self.note(&track, Trouble::Network, Handling::Resumed);
+        self.load_from(&track, at, Start::Retry, cx);
+    }
+
+    /// Asks for the current track again after it failed to load with `reason`, up to
+    /// `RETRY_LIMIT` times, so a stream host that hiccupped does not cost the song. Answers
+    /// whether it did; once the tries are spent, or the listener has paused, the queue moves on.
+    fn retry_failed(&mut self, reason: &str, cx: &mut Context<Self>) -> bool {
+        let Some(track) = self.track.clone() else {
+            return false;
+        };
+        if self.retries >= RETRY_LIMIT || self.intent == Intent::Pause {
+            return false;
+        }
+        self.retry(track, Trouble::Track, reason, cx);
+        true
+    }
+
+    /// Picks the current track up where it stopped when it ended well short of its length, as a
+    /// stream that broke partway leaves it: once the network is back if it is gone, and
+    /// otherwise by asking for it again, up to `RETRY_LIMIT` times. Answers whether it did;
+    /// a track that really ended, or that keeps breaking, moves on as usual.
+    fn picked_up(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(track) = self.track.clone() else {
+            return false;
+        };
+        let length = track.duration;
+        let cut = !length.is_zero() && self.position + CUT_SHORT < length;
+        if !cut || self.sleep == Some(Sleep::EndOfTrack) {
+            return false;
+        }
+        let at = self.position;
+        if Network::lost(cx) && !music::is_local_id(track.id.as_deref().unwrap_or_default()) {
+            self.wait_for_network(track, at, "the stream stopped arriving", cx);
+            return true;
+        }
+        if self.retries >= RETRY_LIMIT {
+            log::warn!("playback: {} kept stopping partway, moving on", track.name);
+            self.note(&track, Trouble::CutShort, Handling::Skipped);
+            return false;
+        }
+        let reason = format!("it stopped at {}s of {}s", at.as_secs(), length.as_secs());
+        self.retry(track, Trouble::CutShort, &reason, cx);
+        true
+    }
+
+    /// Loads `track` again from where it stood after a wait that grows with each try.
+    fn retry(&mut self, track: Track, trouble: Trouble, reason: &str, cx: &mut Context<Self>) {
+        self.retries = self.retries.saturating_add(1);
+        let wait = RETRY_WAIT[usize::from(self.retries - 1).min(RETRY_WAIT.len() - 1)];
+        log::warn!(
+            "playback: {} failed ({reason}), trying again in {}s ({}/{RETRY_LIMIT})",
+            track.name,
+            wait.as_secs(),
+            self.retries
+        );
+        self.note(&track, trouble, Handling::Retrying(self.retries));
+        self.blocked_until = Some(Instant::now() + wait);
+        let at = self.position;
+        self.load_from(&track, at, Start::Retry, cx);
     }
 
     /// Asks for the current track again after the provider turned it down for now. The wait

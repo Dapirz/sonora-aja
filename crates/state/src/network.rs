@@ -114,6 +114,13 @@ impl Network {
         if !music::trouble::offline(reason) {
             return;
         }
+        Self::lose(reason, cx);
+    }
+
+    /// Takes the network for gone whatever `reason` reads as, and checks until it is back. For a
+    /// caller that already knows the connection is the trouble, as a stream that stopped
+    /// arriving does, and would rather wait than give up.
+    pub fn lose(reason: &str, cx: &mut App) {
         let Some(network) = cx
             .try_global::<Sonora>()
             .map(|sonora| sonora.network.clone())

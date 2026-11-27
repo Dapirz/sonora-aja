@@ -73,7 +73,8 @@ pub use outputs::Outputs;
 pub use overload::OutputLevel;
 pub use pins::{PinSort, Pins};
 pub use playback::{
-    Origin, Playback, PlaybackState, PositionTick, Sleep, Unreachable, VOLUME_STEP, Whence,
+    Handling, Origin, Playback, PlaybackProblem, PlaybackState, PositionTick, Sleep, Trouble,
+    Unreachable, VOLUME_STEP, Whence,
 };
 pub use profile::Profile;
 pub use queue::{
@@ -318,6 +319,7 @@ pub fn init(
             queue.clone(),
             settings.clone(),
             &equalizer,
+            &network,
             cx,
         )
     });

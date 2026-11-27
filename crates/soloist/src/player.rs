@@ -1237,6 +1237,7 @@ impl Brain {
             self.report(PlaybackEvent::Unavailable {
                 id: Some(track.id),
                 timed_out: false,
+                reason: "soloist gave up on the track".to_owned(),
             });
         }
     }

@@ -128,6 +128,7 @@ enum Slot {
     StreamFormat,
     StreamBitrate,
     Widevine,
+    PlaybackProblems,
     Soloist,
     OutputDevice,
     OutputFailure,
@@ -1163,6 +1164,7 @@ impl SettingsView {
             Slot::Sleep => (t!("settings-sleep"), t!("settings-sleep-detail")),
             Slot::StayAwake => (t!("settings-stay-awake"), t!("settings-stay-awake-detail")),
             Slot::Widevine => (t!("settings-widevine"), self.widevine_detail(cx)),
+            Slot::PlaybackProblems => (t!("settings-problems"), t!("settings-problems-detail")),
             Slot::Soloist => (t!("settings-soloist"), t!("settings-soloist-detail")),
             Slot::OutputDevice => (
                 t!("settings-output-device"),
@@ -1360,6 +1362,7 @@ impl SettingsView {
             Slot::Buffer => self.buffer_row(cx),
             Slot::MatchRate => self.match_rate_row(cx),
             Slot::Widevine => self.widevine_row(cx),
+            Slot::PlaybackProblems => self.problems_row(cx),
             Slot::Soloist => self.soloist_row(cx),
             Slot::Equalizer => self.equalizer_row(cx),
             Slot::LyricsSources => self.lyrics_sources_row(cx),

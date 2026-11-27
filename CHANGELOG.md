@@ -9,6 +9,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Settings → Playback lists the playback problems since Sonora started: when, which song, what went wrong and what Sonora did about it.
 - Plex is a new provider. Sign in with your Plex account and play, search, rate, make playlists, start song radio and read lyrics from your own Plex Media Server.
 - Settings → Player bar has an Island layout that floats the player as a rounded pill over the page, and resting the pointer on its thin progress line opens it with both times.
 - In a Jam or a Session, the player shows the face of whoever queued the song playing now, and the Members panel rings them.
@@ -26,6 +27,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Playback keeps going through trouble. When the network drops, the song waits and picks up where it stopped once the connection is back. A song that will not load, or stops partway, is tried twice more before Sonora moves on, and playback only stops once every song in the queue has failed.
 - Word-synced lyrics move like Apple Music: each word lifts gently as it is sung, and long held syllables glow and swell a little before settling back.
 - Seeking far ahead in a song that is still downloading plays from there in a second or two on Deezer, YouTube Music, Subsonic, Navidrome and Jellyfin, as it already did on Tidal.
 - Home on Subsonic and Navidrome servers labels the albums added to the server most recently as Recently added and adds a Newest releases shelf ordered by release year.
@@ -62,6 +64,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- YouTube Music songs start in about a second again when you are signed in at the best quality, rather than after 10 to 15 seconds, and no longer time out and stop the queue.
 - Opening a menu no longer thickens the haze under the Settings header, so the page scrolling beneath it looks the same with the menu open as without.
 - A dropdown in Settings resizes to a newly picked option without shaking: its arrow and edge stay in place, and its text no longer jumps up and down.
 - The YouTube Music sign-in window on NixOS without GNOME lays Google's page out properly instead of squeezing it into a narrow column of broken text.
