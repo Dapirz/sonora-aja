@@ -37,6 +37,7 @@ impl SettingsView {
         let mut playing = vec![Slot::Normalisation, Slot::Gapless];
         if self.session.read(cx).provider_slug() == Some("youtube") {
             playing.push(Slot::SponsorBlock);
+            playing.push(Slot::AlbumVersions);
         }
         playing.extend([Slot::Sleep, Slot::StayAwake]);
         let mut groups = vec![Group::new("settings-group-playing").rows(playing)];
@@ -160,6 +161,22 @@ impl SettingsView {
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.playback
                         .update(cx, |playback, cx| playback.set_gapless(!on, cx));
+                }))
+                .into_any_element(),
+        )
+    }
+
+    /// The switch that plays a music video turning up in a playlist, a radio or the queue as its
+    /// album version.
+    pub(super) fn album_versions_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let on = self.settings.read(cx).album_versions();
+        self.row(
+            t!("settings-album-versions"),
+            Switch::new("album-versions", on)
+                .name(t!("settings-album-versions"))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.settings
+                        .update(cx, |settings, cx| settings.set_album_versions(!on, cx));
                 }))
                 .into_any_element(),
         )

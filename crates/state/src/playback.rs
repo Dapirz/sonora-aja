@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -102,6 +102,8 @@ const RETRY_WAIT: [Duration; 2] = [Duration::from_secs(2), Duration::from_secs(5
 const CUT_SHORT: Duration = Duration::from_secs(8);
 /// How many playback problems the list keeps, newest first.
 const PROBLEMS_KEPT: usize = 50;
+/// How long a music video waits for its album version to be found before it plays as itself.
+const VERSION_PATIENCE: Duration = Duration::from_secs(4);
 /// The wait before a track the provider turned down for now is asked for again. Each refusal in
 /// a row doubles it, up to `THROTTLE_CAP`.
 const THROTTLE_WAIT: Duration = Duration::from_secs(2);
@@ -270,6 +272,30 @@ pub enum PlaybackState {
     Loading,
     /// Nothing plays and this is why, in developer English.
     Failed(String),
+}
+
+/// Which of a music video's two recordings is playing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Version {
+    /// The album version, the plain recording without the video's intro or skits.
+    Song,
+    /// The music video's own sound.
+    Video,
+}
+
+/// A music video and its album version, one of which is playing.
+#[derive(Clone)]
+struct Versions {
+    video: Track,
+    song: Track,
+}
+
+impl Versions {
+    fn holds(&self, id: &str) -> bool {
+        [&self.video, &self.song]
+            .iter()
+            .any(|track| track.id.as_deref() == Some(id))
+    }
 }
 
 /// What went wrong with a track, for the list of playback problems.
@@ -726,6 +752,12 @@ pub struct Playback {
     problems: VecDeque<PlaybackProblem>,
     /// How many problems have been noted, which numbers the next one.
     noted: u64,
+    /// The music video playing as its album version, or switched back to the video, with both
+    /// recordings, so the player can offer the other one.
+    versions: Option<Versions>,
+    /// Videos the listener chose to hear as videos: picked from a search's videos, or switched
+    /// back to. They never play as their album version.
+    kept_videos: HashSet<String>,
     /// When the engine last reported a pause. It is wall-clock time so a suspend counts toward
     /// `STALE_PAUSE`, and a clock set back counts as stale.
     paused_at: Option<SystemTime>,
@@ -918,6 +950,8 @@ impl Playback {
             waiting: None,
             problems: VecDeque::new(),
             noted: 0,
+            versions: None,
+            kept_videos: HashSet::new(),
             paused_at: None,
             refused: None,
             resume_at: None,
@@ -1257,6 +1291,14 @@ impl Playback {
             return;
         }
         self.silence_other(&id);
+        if !self
+            .versions
+            .as_ref()
+            .is_some_and(|versions| versions.holds(&id))
+        {
+            self.versions = None;
+        }
+        let lookup = self.album_lookup(track, cx);
         if !matches!(start, Start::Segue | Start::Retry) {
             self.failures = 0;
         }
@@ -1286,12 +1328,21 @@ impl Playback {
             .unwrap_or_default()
             .max(start.debounce());
 
+        let video = track.clone();
         self.load = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(wait).await;
+            let album = match lookup {
+                Some(lookup) => crate::join(lookup).await.ok().flatten(),
+                None => None,
+            };
             this.update(cx, |this, cx| {
                 if this.intent == Intent::Pause {
                     return this.hold(at, cx);
                 }
+                let id = match album {
+                    Some(song) => this.play_as_album(video, song, cx),
+                    None => id,
+                };
                 let Some(engine) = this.engine_for(&id) else {
                     return;
                 };
@@ -3818,6 +3869,97 @@ impl Playback {
         log::error!("playback: {problem}");
         self.state = PlaybackState::Failed(problem);
         cx.notify();
+    }
+
+    /// The search for `track`'s album version, when it is a music video that should play as one:
+    /// the setting is on, it streams, it has no album, and the listener has not chosen to hear
+    /// it as a video. It gives up after `VERSION_PATIENCE`, so a slow answer only costs the swap.
+    fn album_lookup(
+        &self,
+        track: &Track,
+        cx: &App,
+    ) -> Option<tokio::task::JoinHandle<Result<Option<Track>>>> {
+        let id = track.id.as_deref()?;
+        let wanted = self.settings.read(cx).album_versions()
+            && !music::is_local_id(id)
+            && track.album_id.is_none()
+            && self.versions.is_none()
+            && !self.kept_videos.contains(id);
+        if !wanted {
+            return None;
+        }
+        let client = self.session.read(cx).client()?;
+        let video = track.clone();
+        Some(Io::global(cx).spawn(async move {
+            match tokio::time::timeout(VERSION_PATIENCE, client.album_version(&video)).await {
+                Ok(found) => found,
+                Err(_) => {
+                    log::debug!("playback: no album version of {} in time", video.name);
+                    Ok(None)
+                }
+            }
+        }))
+    }
+
+    /// Plays `song` in place of the music video `video` it is the album version of, and keeps
+    /// both so the player can switch back. Answers the id to load.
+    fn play_as_album(&mut self, video: Track, song: Track, cx: &mut Context<Self>) -> String {
+        log::info!(
+            "playback: {} plays as its album version, {}",
+            video.name,
+            song.name
+        );
+        let id = song.id.clone().unwrap_or_default();
+        self.track = Some(song.clone());
+        self.versions = Some(Versions { video, song });
+        cx.notify();
+        id
+    }
+
+    /// Which recording of a music video is playing, or `None` when the current track has only
+    /// the one.
+    pub fn version(&self) -> Option<Version> {
+        let id = self.track.as_ref()?.id.as_deref()?;
+        let versions = self
+            .versions
+            .as_ref()
+            .filter(|versions| versions.holds(id))?;
+        Some(match versions.song.id.as_deref() == Some(id) {
+            true => Version::Song,
+            false => Version::Video,
+        })
+    }
+
+    /// Plays the other recording of the current music video from where this one stands. Going
+    /// back to the video keeps it a video from then on, and going to the song lets the swap
+    /// happen again.
+    pub fn switch_version(&mut self, cx: &mut Context<Self>) {
+        let Some(version) = self.version() else {
+            return;
+        };
+        let Some(versions) = self.versions.clone() else {
+            return;
+        };
+        let video = versions.video.id.clone().unwrap_or_default();
+        let target = match version {
+            Version::Song => {
+                self.kept_videos.insert(video);
+                versions.video
+            }
+            Version::Video => {
+                self.kept_videos.remove(&video);
+                versions.song
+            }
+        };
+        let at = self.position;
+        self.load_from(&target, at, Start::Pick, cx);
+    }
+
+    /// Keeps `track` a music video when it plays, as one chosen from a search's videos is.
+    pub fn keep_as_video(&mut self, track: &Track) {
+        if let Some(id) = &track.id {
+            self.kept_videos.insert(id.clone());
+        }
     }
 
     /// Files a problem at the top of the list and in the log's terms, dropping the oldest past

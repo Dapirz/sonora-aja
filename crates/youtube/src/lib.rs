@@ -2,6 +2,7 @@
 //! lyrics, and streams fetched with the proof-of-origin token `music::potoken` hands over.
 
 mod accounts;
+mod album;
 mod auth;
 mod client;
 mod genres;

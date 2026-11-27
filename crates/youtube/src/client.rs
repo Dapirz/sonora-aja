@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result, ensure};
 use async_trait::async_trait;
@@ -13,7 +13,7 @@ use music::{
 use tokio::task::JoinSet;
 use ytmusic::YtMusic;
 
-use crate::{genres, radio, search, subscriptions, wire};
+use crate::{album, genres, radio, search, subscriptions, wire};
 
 const PORTRAIT_LIMIT: usize = 24;
 /// Limits concurrent album reads while building an artist's queue.
@@ -29,6 +29,9 @@ const EPISODES: &str = "SE";
 pub struct YouTubeClient {
     api: Arc<YtMusic>,
     account: String,
+    /// The album versions already looked up, by video id, `None` for a video with none, so a
+    /// video played again asks nothing.
+    versions: Mutex<HashMap<String, Option<Track>>>,
 }
 
 impl YouTubeClient {
@@ -36,6 +39,7 @@ impl YouTubeClient {
         Self {
             api,
             account: String::new(),
+            versions: Mutex::new(HashMap::new()),
         }
     }
 
@@ -496,6 +500,26 @@ impl MusicApi for YouTubeClient {
         search::file(&mut found, SearchKind::Playlists, playlists);
         search::file(&mut found, SearchKind::Artists, artists);
         found
+    }
+
+    async fn album_version(&self, track: &Track) -> Result<Option<Track>> {
+        // a track with an album is a song already
+        let Some(id) = track.id.clone().filter(|_| track.album_id.is_none()) else {
+            return Ok(None);
+        };
+        let known = self
+            .versions
+            .lock()
+            .ok()
+            .and_then(|held| held.get(&id).cloned());
+        if let Some(known) = known {
+            return Ok(known);
+        }
+        let found = album::version(&self.api, track).await?;
+        if let Ok(mut held) = self.versions.lock() {
+            held.insert(id, found.clone());
+        }
+        Ok(found)
     }
 
     async fn search_more(&self, kind: SearchKind, token: &str) -> Result<Found> {

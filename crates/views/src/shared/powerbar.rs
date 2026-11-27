@@ -725,9 +725,12 @@ fn origin_of(hit: &Hit) -> Option<Origin> {
 fn enter_hit(hit: &Hit, playback: &Entity<Playback>, cx: &mut App) {
     hit.remember(cx);
     match hit {
-        Hit::Song(track) | Hit::Video(track) => {
-            playback.update(cx, |playback, cx| playback.play_radio(track, cx))
-        }
+        Hit::Song(track) | Hit::Video(track) => playback.update(cx, |playback, cx| {
+            if matches!(hit, Hit::Video(_)) {
+                playback.keep_as_video(track);
+            }
+            playback.play_radio(track, cx)
+        }),
         _ => navigate_hit(hit, cx),
     }
 }
@@ -738,6 +741,9 @@ fn toggle_hit(hit: &Hit, playback: &Entity<Playback>, cx: &mut App) {
     hit.remember(cx);
     playback.update(cx, |playback, cx| match (hit, origin_of(hit)) {
         (Hit::Song(track) | Hit::Video(track), _) => {
+            if matches!(hit, Hit::Video(_)) {
+                playback.keep_as_video(track);
+            }
             let current = track.id.is_some()
                 && playback.track().and_then(|playing| playing.id.as_ref()) == track.id.as_ref();
             match current {

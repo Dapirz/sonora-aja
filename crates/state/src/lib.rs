@@ -74,7 +74,7 @@ pub use overload::OutputLevel;
 pub use pins::{PinSort, Pins};
 pub use playback::{
     Handling, Origin, Playback, PlaybackProblem, PlaybackState, PositionTick, Sleep, Trouble,
-    Unreachable, VOLUME_STEP, Whence,
+    Unreachable, VOLUME_STEP, Version, Whence,
 };
 pub use profile::Profile;
 pub use queue::{

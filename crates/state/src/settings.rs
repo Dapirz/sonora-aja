@@ -394,6 +394,9 @@ struct Values {
     normalisation: bool,
     gapless: bool,
     sponsorblock: bool,
+    /// Whether a music video that turns up in a playlist, a radio or the queue plays as its album
+    /// version, without the video's intro or skits.
+    album_versions: bool,
     /// Whether played tracks are kept, sealed, so playing one again downloads nothing.
     keep_tracks: bool,
     /// How many gigabytes the cache of played tracks may take. Downloads do not count.
@@ -740,6 +743,7 @@ impl Default for Values {
             normalisation: false,
             gapless: true,
             sponsorblock: false,
+            album_versions: true,
             keep_tracks: true,
             offline_mode: false,
             cache_gb: crate::vault::CACHE_GB,
@@ -1141,6 +1145,11 @@ impl AppSettings {
 
     pub fn gapless(&self) -> bool {
         self.values.gapless
+    }
+
+    /// Whether a music video plays as its album version where one is surely the same recording.
+    pub fn album_versions(&self) -> bool {
+        self.values.album_versions
     }
 
     pub fn sponsorblock(&self) -> bool {
@@ -1800,6 +1809,11 @@ impl AppSettings {
 
     pub fn set_gapless(&mut self, gapless: bool, cx: &mut Context<Self>) {
         self.values.gapless = gapless;
+        self.schedule_save(cx);
+    }
+
+    pub fn set_album_versions(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.values.album_versions = enabled;
         self.schedule_save(cx);
     }
 

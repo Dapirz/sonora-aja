@@ -12,7 +12,7 @@ use gpui::{
 use gpui::{Div, Window, deferred, div, px, rems};
 use i18n::t;
 use input::{ShowMembers, ToggleFullscreen, ToggleLyrics, ToggleQueue};
-use state::{AppSettings, Playback, PlayerBarLayout, Queue, SideTab, Sonora};
+use state::{AppSettings, Playback, PlayerBarLayout, Queue, SideTab, Sonora, Version};
 use ui::{Artwork, Button, Flight, Pinnable, Popup, Room, Scrollbar, ScrubberState, Sprung};
 
 use crate::chrome::sessions_button::SessionsButton;
@@ -287,11 +287,30 @@ impl PlayerBar {
                 })
         };
 
+        // A music video playing as its album version offers the video, and the other way round.
+        let version = self.playback.read(cx).version().map(|version| {
+            let (icon, hint) = match version {
+                Version::Song => ("icons/tv.svg", "player-play-video"),
+                Version::Video => ("icons/music.svg", "player-play-song"),
+            };
+            let playback = self.playback.clone();
+            Button::new("player-version")
+                .ghost()
+                .small()
+                .icon(icon)
+                .tooltip_above(hint)
+                .tint(theme.muted_foreground)
+                .on_click(move |_, _, cx| {
+                    playback.update(cx, |playback, cx| playback.switch_version(cx));
+                })
+        });
+
         div()
             .flex()
             .flex_none()
             .items_center()
             .gap_1()
+            .children(version)
             .when(lyrics, |this| {
                 this.child(button(
                     "player-lyrics",

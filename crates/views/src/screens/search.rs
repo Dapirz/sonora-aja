@@ -731,12 +731,18 @@ impl SearchView {
     /// search history.
     fn open_hit(&mut self, hit: Hit, cx: &mut Context<Self>) {
         hit.remember(cx);
+        let video = matches!(hit, Hit::Video(_));
         match hit {
             Hit::Song(track) | Hit::Video(track) => {
                 let current = track.id.is_some() && track.id == self.playback_status.0;
-                self.playback.update(cx, |playback, cx| match current {
-                    true => playback.toggle_play(cx),
-                    false => playback.play_radio(&track, cx),
+                self.playback.update(cx, |playback, cx| {
+                    if video {
+                        playback.keep_as_video(&track);
+                    }
+                    match current {
+                        true => playback.toggle_play(cx),
+                        false => playback.play_radio(&track, cx),
+                    }
                 });
             }
             Hit::Artist(artist) => {
@@ -885,9 +891,14 @@ impl SearchView {
                 let play: Play = Box::new(move |_, window, cx| {
                     chosen.remember(cx);
                     me.update(cx, |this, cx| {
-                        this.playback.update(cx, |playback, cx| match current {
-                            true => playback.toggle_play(cx),
-                            false => playback.play_radio(&track, cx),
+                        this.playback.update(cx, |playback, cx| {
+                            if matches!(chosen, Hit::Video(_)) {
+                                playback.keep_as_video(&track);
+                            }
+                            match current {
+                                true => playback.toggle_play(cx),
+                                false => playback.play_radio(&track, cx),
+                            }
                         });
                         this.leave_field(window, cx);
                     })
@@ -1330,8 +1341,12 @@ fn pressed(
         hit.remember(cx);
         me.update(cx, |this, cx| match &hit {
             Hit::Song(track) | Hit::Video(track) => {
-                this.playback
-                    .update(cx, |playback, cx| playback.play_radio(track, cx));
+                this.playback.update(cx, |playback, cx| {
+                    if matches!(hit, Hit::Video(_)) {
+                        playback.keep_as_video(track);
+                    }
+                    playback.play_radio(track, cx)
+                });
                 this.leave_field(window, cx);
             }
             Hit::Artist(artist) => {
