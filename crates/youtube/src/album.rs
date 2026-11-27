@@ -54,6 +54,27 @@ pub async fn version(api: &YtMusic, video: &Track) -> Result<Option<Track>> {
         .find(|hit| same_song(video, hit)))
 }
 
+/// The official music video of `song`, or `None` when no video is surely of the same
+/// recording. Only an upload credited to the song's own artists counts, so a lyric video from
+/// another channel never does.
+pub async fn video(api: &YtMusic, song: &Track) -> Result<Option<Track>> {
+    let Some(artist) = artists(song).into_iter().next() else {
+        return Ok(None);
+    };
+    let query = format!("{} {artist}", song.name);
+    let mut found = music::Found::empty();
+    search::file(
+        &mut found,
+        SearchKind::Videos,
+        search::first(api, &query, SearchKind::Videos).await,
+    );
+    Ok(found
+        .videos?
+        .into_iter()
+        .take(WEIGHED)
+        .find(|hit| hit.album_id.is_none() && same_song(hit, song)))
+}
+
 /// Whether `hit`, a song, is the recording `video` shows: the same title once the video's own
 /// markings are off, every artist of the video credited on the song, and a length that fits.
 /// A video can run longer than its song, or be cut down from it.

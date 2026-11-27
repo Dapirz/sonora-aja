@@ -445,11 +445,10 @@ pub trait MusicApi: Send + Sync {
         anyhow::bail!("this provider has no further search pages")
     }
 
-    /// The album version of `track` when it is a music video: the plain recording the provider
-    /// files as a song, which plays without the video's intro or skits. `None` for a track that
-    /// is already a song, and for a video with no sure match. Only a provider that tells videos
-    /// from songs answers.
-    async fn album_version(&self, _track: &Track) -> Result<Option<Track>> {
+    /// The other recording of `track`: the album version of a music video, which plays without
+    /// the video's intro or skits, or the music video of a song. `None` when there is no sure
+    /// match. Only a provider that tells videos from songs answers.
+    async fn counterpart(&self, _track: &Track) -> Result<Option<Track>> {
         Ok(None)
     }
 

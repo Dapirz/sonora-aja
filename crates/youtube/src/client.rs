@@ -29,8 +29,8 @@ const EPISODES: &str = "SE";
 pub struct YouTubeClient {
     api: Arc<YtMusic>,
     account: String,
-    /// The album versions already looked up, by video id, `None` for a video with none, so a
-    /// video played again asks nothing.
+    /// The other recordings already looked up, by track id, `None` for a track with none, so a
+    /// track played again asks nothing.
     versions: Mutex<HashMap<String, Option<Track>>>,
 }
 
@@ -502,9 +502,8 @@ impl MusicApi for YouTubeClient {
         found
     }
 
-    async fn album_version(&self, track: &Track) -> Result<Option<Track>> {
-        // a track with an album is a song already
-        let Some(id) = track.id.clone().filter(|_| track.album_id.is_none()) else {
+    async fn counterpart(&self, track: &Track) -> Result<Option<Track>> {
+        let Some(id) = track.id.clone() else {
             return Ok(None);
         };
         let known = self
@@ -515,7 +514,11 @@ impl MusicApi for YouTubeClient {
         if let Some(known) = known {
             return Ok(known);
         }
-        let found = album::version(&self.api, track).await?;
+        // a track with an album is a song, and anything else is taken for a video
+        let found = match track.album_id.is_some() {
+            true => album::video(&self.api, track).await?,
+            false => album::version(&self.api, track).await?,
+        };
         if let Ok(mut held) = self.versions.lock() {
             held.insert(id, found.clone());
         }

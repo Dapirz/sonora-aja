@@ -758,6 +758,9 @@ pub struct Playback {
     /// Videos the listener chose to hear as videos: picked from a search's videos, or switched
     /// back to. They never play as their album version.
     kept_videos: HashSet<String>,
+    /// The search for the other recording of the track that just started, so the player can
+    /// offer it. It never changes what plays.
+    pairing: Option<Task<()>>,
     /// When the engine last reported a pause. It is wall-clock time so a suspend counts toward
     /// `STALE_PAUSE`, and a clock set back counts as stale.
     paused_at: Option<SystemTime>,
@@ -952,6 +955,7 @@ impl Playback {
             noted: 0,
             versions: None,
             kept_videos: HashSet::new(),
+            pairing: None,
             paused_at: None,
             refused: None,
             resume_at: None,
@@ -1349,8 +1353,9 @@ impl Playback {
                 engine.within(this.collection_for(&id, cx).as_ref());
                 if let Err(error) = engine.load(&id, at, start == Start::Segue) {
                     let reason = crate::blamed(&error, cx);
-                    this.failed(reason, cx);
+                    return this.failed(reason, cx);
                 }
+                this.pair(cx);
             })
             .ok();
         }));
@@ -3891,7 +3896,7 @@ impl Playback {
         let client = self.session.read(cx).client()?;
         let video = track.clone();
         Some(Io::global(cx).spawn(async move {
-            match tokio::time::timeout(VERSION_PATIENCE, client.album_version(&video)).await {
+            match tokio::time::timeout(VERSION_PATIENCE, client.counterpart(&video)).await {
                 Ok(found) => found,
                 Err(_) => {
                     log::debug!("playback: no album version of {} in time", video.name);
@@ -3899,6 +3904,55 @@ impl Playback {
                 }
             }
         }))
+    }
+
+    /// Looks for the other recording of the track that is loading, without changing what plays,
+    /// so the player can offer the music video of a song, or the album version of a video the
+    /// listener chose to hear as one. A track already paired asks nothing.
+    fn pair(&mut self, cx: &mut Context<Self>) {
+        self.pairing = None;
+        let Some(track) = self.track.clone() else {
+            return;
+        };
+        let Some(id) = track.id.clone() else {
+            return;
+        };
+        let paired = self
+            .versions
+            .as_ref()
+            .is_some_and(|versions| versions.holds(&id));
+        if paired || music::is_local_id(&id) {
+            return;
+        }
+        let Some(client) = self.session.read(cx).client() else {
+            return;
+        };
+        let asked = track.clone();
+        let request = Io::global(cx).spawn(async move { client.counterpart(&asked).await });
+        self.pairing = Some(cx.spawn(async move |this, cx| {
+            let found = crate::join(request).await;
+            this.update(cx, |this, cx| {
+                let other = match found {
+                    Ok(Some(other)) => other,
+                    Ok(None) => return,
+                    Err(error) => {
+                        log::debug!("playback: cannot pair {}: {error:#}", track.name);
+                        return;
+                    }
+                };
+                let current = this.track.as_ref().and_then(|track| track.id.as_deref());
+                if current != Some(id.as_str()) {
+                    return;
+                }
+                let (video, song) = match track.album_id.is_some() {
+                    true => (other, track),
+                    false => (track, other),
+                };
+                this.versions = Some(Versions { video, song });
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     /// Plays `song` in place of the music video `video` it is the album version of, and keeps

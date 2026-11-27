@@ -9,7 +9,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- On YouTube Music, a music video in a playlist, a radio or the queue plays as its album version, without the video's intro or skits, and a button in the player switches to the video and back. Videos you pick from search stay videos, and Settings → Playback turns it off.
+- On YouTube Music, a music video in a playlist, a radio or the queue plays as its album version, without the video's intro or skits, and a button in the player switches any song with a music video between the two. Videos you pick from search stay videos, and Settings → Playback turns it off.
 - Settings → Playback lists the playback problems since Sonora started: when, which song, what went wrong and what Sonora did about it.
 - Plex is a new provider. Sign in with your Plex account and play, search, rate, make playlists, start song radio and read lyrics from your own Plex Media Server.
 - Settings → Player bar has an Island layout that floats the player as a rounded pill over the page, and resting the pointer on its thin progress line opens it with both times.
